@@ -4,132 +4,140 @@ import streamlit as st
 
 # Configuración de la página web
 st.set_page_config(
-    page_title="Visualizador de Datos SAP - TECSUR",
+    page_title="Sistema Consolidado SAP - TECSUR",
     page_icon="⚡",
     layout="wide"
 )
 
-st.title("⚡ Visualizador e Inspector de Mapeo SAP")
-st.markdown("Herramienta interactiva para explorar la relación entre **Programas, Elementos PEP, Clases de OM y Actividades PM / OP**.")
+st.title("⚡ Sistema Consolidado de Mapeo SAP y Programas TECSUR")
+st.markdown("Plataforma relacional unificada que conecta el **Catálogo Maestro de Programas (CR)** con el **Detalle Operativo SAP (PEP, OM, Actividades PM/OP)**.")
 
-# Obtener la carpeta donde está guardado este archivo script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 @st.cache_data
-def cargar_datos_robusto():
+def cargar_y_consolidar_datos():
     archivos = os.listdir(BASE_DIR)
     
-    # 1. Buscar archivos Excel en la carpeta
     archivos_excel = [f for f in archivos if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~$')]
-    
-    # 2. Buscar archivos CSV en la carpeta
     csv_programas = [f for f in archivos if 'programas' in f.lower() and f.lower().endswith('.csv')]
     csv_actividades = [f for f in archivos if 'actividad' in f.lower() and f.lower().endswith('.csv')]
-    
-    df_prog = None
-    df_act = None
 
-    # Intento A: Cargar desde Excel
+    # 1. Cargar DataFrames base
     if archivos_excel:
-        ruta_excel = os.path.join(BASE_DIR, archivos_excel[0])
-        xls = pd.ExcelFile(ruta_excel)
+        ruta = os.path.join(BASE_DIR, archivos_excel[0])
+        xls = pd.ExcelFile(ruta)
         hojas = xls.sheet_names
+        h_prog = next((h for h in hojas if 'prog' in h.lower()), hojas[0])
+        h_act = next((h for h in hojas if 'act' in h.lower()), hojas[1] if len(hojas) > 1 else hojas[0])
         
-        hoja_prog = next((h for h in hojas if 'prog' in h.lower()), hojas[0])
-        hoja_act = next((h for h in hojas if 'act' in h.lower()), hojas[1] if len(hojas) > 1 else hojas[0])
-        
-        df_prog = pd.read_excel(xls, sheet_name=hoja_prog)
-        df_act = pd.read_excel(xls, sheet_name=hoja_act)
-    
-    # Intento B: Cargar desde CSVs
+        df_prog = pd.read_excel(xls, sheet_name=h_prog)
+        df_act = pd.read_excel(xls, sheet_name=h_act)
     elif csv_programas and csv_actividades:
-        ruta_prog = os.path.join(BASE_DIR, csv_programas[0])
-        ruta_act = os.path.join(BASE_DIR, csv_actividades[0])
-        df_prog = pd.read_csv(ruta_prog)
-        df_act = pd.read_csv(ruta_act)
+        df_prog = pd.read_csv(os.path.join(BASE_DIR, csv_programas[0]))
+        df_act = pd.read_csv(os.path.join(BASE_DIR, csv_actividades[0]))
     else:
-        raise FileNotFoundError(f"No se encontraron archivos de datos. Archivos detectados en la carpeta: {archivos}")
+        raise FileNotFoundError("No se encontraron los archivos de origen de datos.")
 
-    # Limpieza de columnas
+    # 2. Limpieza de nombres de columnas
     df_prog.columns = [str(c).strip() for c in df_prog.columns]
     df_act.columns = [str(c).strip() for c in df_act.columns]
 
-    return df_prog, df_act, archivos
+    # Identificar nombres clave
+    col_desc_prog = 'Operación Lima / Cañete' if 'Operación Lima / Cañete' in df_prog.columns else df_prog.columns[-1]
+    col_desc_act = 'ACTIVIDAD/PROGRAMA TECSUR' if 'ACTIVIDAD/PROGRAMA TECSUR' in df_act.columns else df_act.columns[1]
 
-# Intentar la carga de datos
+    # Limpieza de textos para cruce perfecto
+    df_prog['key_desc'] = df_prog[col_desc_prog].astype(str).str.strip().str.upper()
+    df_act['key_desc'] = df_act[col_desc_act].astype(str).str.strip().str.upper()
+
+    # 3. CONSOLIDACIÓN / JOIN RELACIONAL
+    df_merged = pd.merge(
+        df_act,
+        df_prog[['PROGRAMA', 'ACTIVIDAD', 'CR', 'key_desc']],
+        on='key_desc',
+        how='left'
+    )
+
+    # Eliminar columna auxiliar de cruce
+    df_merged.drop(columns=['key_desc'], inplace=True)
+    
+    # Ordenar columnas estratégicamente
+    cols_orden = [
+        'PROGRAMA', 'ACTIVIDAD', 'CR', 'GP', 'ACTIVIDAD/PROGRAMA TECSUR', 
+        'Unidad', 'PEP', 'Clase de OM', 'Act PM', 'Descripcion Actividad PM', 
+        'Act Operativa', 'Descripción Act Operativa'
+    ]
+    cols_finales = [c for c in cols_orden if c in df_merged.columns] + [c for c in df_merged.columns if c not in cols_orden]
+    
+    return df_prog, df_act, df_merged[cols_finales]
+
 try:
-    df_prog, df_act, archivos_detectados = cargar_datos_robusto()
-    st.success("✅ Base de datos cargada correctamente.")
+    df_prog, df_act, df_consolidado = cargar_y_consolidar_datos()
+    st.success("✅ Base de datos relacional integrada exitosamente.")
 except Exception as e:
-    st.error(f"❌ No se pudo cargar la base de datos.")
-    st.warning(f"Detalle del aviso: {e}")
-    st.info(f"📁 Ruta del proyecto: `{BASE_DIR}`")
+    st.error(f"❌ Error durante el procesamiento relacional: {e}")
     st.stop()
 
-# --- FILTROS EN BARRA LATERAL ---
-st.sidebar.header("🎯 Filtros de Consulta SAP")
+# --- BARRA LATERAL CON FILTROS AVANZADOS ---
+st.sidebar.header("🎯 Filtros de Consulta Consolidada")
 
-col_prog = next((c for c in df_prog.columns if 'programa' in c.lower()), df_prog.columns[0])
-programas = ["Todos"] + sorted(list(df_prog[col_prog].dropna().astype(str).unique()))
-programa_sel = st.sidebar.selectbox("Seleccionar Programa:", programas)
+# Filtro 1: Programa Maestro
+programas = ["Todos"] + sorted([str(p) for p in df_consolidado['PROGRAMA'].dropna().unique()])
+prog_sel = st.sidebar.selectbox("Programa Maestro:", programas)
 
-# Detectar columna de Clase de OM en Actividades
-col_om = next((c for c in df_act.columns if 'om' in c.lower() or 'clase' in c.lower()), None)
-
-if col_om:
-    clases_om = ["Todas"] + sorted([str(x).strip() for x in df_act[col_om].dropna().unique() if str(x).strip() not in ['-', 'nan']])
-    om_sel = st.sidebar.selectbox("Clase de OM:", clases_om)
+# Filtro 2: Código de Actividad (PL01, PC01, etc.)
+codigos_act = ["Todos"]
+if prog_sel != "Todos":
+    sub_df = df_consolidado[df_consolidado['PROGRAMA'] == prog_sel]
+    codigos_act += sorted([str(a) for a in sub_df['ACTIVIDAD'].dropna().unique()])
 else:
-    om_sel = "Todas"
+    codigos_act += sorted([str(a) for a in df_consolidado['ACTIVIDAD'].dropna().unique()])
 
-busqueda = st.sidebar.text_input("🔍 Búsqueda rápida por texto:", "")
+act_sel = st.sidebar.selectbox("Código Actividad (PL/PC):", codigos_act)
 
-# --- FILTRADO DE DATOS ---
-df_act_filt = df_act.copy()
+# Filtro 3: Clase de Orden de Mantenimiento
+clases_om = ["Todas"] + sorted([str(x).strip() for x in df_consolidado['Clase de OM'].dropna().unique() if str(x).strip() not in ['-', 'nan']])
+om_sel = st.sidebar.selectbox("Clase de OM (ZM03/ZM06):", clases_om)
 
-if programa_sel != "Todos":
-    col_act_prog = next((c for c in df_act_filt.columns if 'actividad' in c.lower() or 'programa' in c.lower()), df_act_filt.columns[0])
-    df_act_filt = df_act_filt[
-        df_act_filt[col_act_prog].astype(str).str.contains(programa_sel, case=False, na=False)
-    ]
+# Filtro 4: Búsqueda global por texto
+busqueda = st.sidebar.text_input("🔍 Búsqueda rápida global:", "")
 
-if om_sel != "Todas" and col_om:
-    df_act_filt = df_act_filt[df_act_filt[col_om].astype(str) == om_sel]
+# --- APLICAR FILTROS EN CASCADA ---
+df_filt = df_consolidado.copy()
+
+if prog_sel != "Todos":
+    df_filt = df_filt[df_filt['PROGRAMA'] == prog_sel]
+
+if act_sel != "Todos":
+    df_filt = df_filt[df_filt['ACTIVIDAD'] == act_sel]
+
+if om_sel != "Todas":
+    df_filt = df_filt[df_filt['Clase de OM'].astype(str) == om_sel]
 
 if busqueda:
-    condiciones = [
-        df_act_filt[c].astype(str).str.contains(busqueda, case=False, na=False)
-        for c in df_act_filt.columns
-    ]
-    mask = condiciones[0]
-    for cond in condiciones[1:]:
-        mask = mask | cond
-    df_act_filt = df_act_filt[mask]
+    mask = pd.Series(False, index=df_filt.index)
+    for col in df_filt.columns:
+        mask = mask | df_filt[col].astype(str).str.contains(busqueda, case=False, na=False)
+    df_filt = df_filt[mask]
 
-# --- MÉTRICAS PRINCIPALES ---
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Programas", len(df_prog))
-col2.metric("Coincidencias", len(df_act_filt))
-
-col_pep = next((c for c in df_act.columns if 'pep' in c.lower()), None)
-col1_act_pm = next((c for c in df_act.columns if 'act' in c.lower() and 'pm' in c.lower()), None)
-
-col3.metric("Elementos PEP Únicos", df_act[col_pep].nunique() if col_pep else "N/A")
-col4.metric("Actividades PM Únicas", df_act[col1_act_pm].nunique() if col1_act_pm else "N/A")
+# --- VISTA PRINCIPAL & METRICAS DE IMPACTO ---
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Registros Matheados", len(df_filt))
+k2.metric("Centros Responsabilidad (CR)", df_filt['CR'].nunique() if 'CR' in df_filt.columns else 0)
+k3.metric("Elementos PEP SAP", df_filt['PEP'].nunique() if 'PEP' in df_filt.columns else 0)
+k4.metric("Actividades PM Únicas", df_filt['Act PM'].nunique() if 'Act PM' in df_filt.columns else 0)
 
 st.divider()
 
-# --- VISTA EN DOS COLUMNAS ---
-c_left, c_right = st.columns([1, 2])
+# --- PESTAÑAS DE VISUALIZACIÓN ---
+tab1, tab2 = st.tabs(["📊 Vista Consolidada Unificada", "🔍 Inspector por Programa"])
 
-with c_left:
-    st.subheader("📋 Catálogo de Programas")
-    if programa_sel != "Todos":
-        df_prog_show = df_prog[df_prog[col_prog] == programa_sel]
-    else:
-        df_prog_show = df_prog
-    st.dataframe(df_prog_show, use_container_width=True, height=500)
+with tab1:
+    st.subheader("📋 Tabla Maestra Consolidada (Programas + SAP)")
+    st.dataframe(df_filt, use_container_width=True, height=550)
 
-with c_right:
-    st.subheader("🛠️ Detalle de Coincidencias SAP")
-    st.dataframe(df_act_filt, use_container_width=True, height=500)
+with tab2:
+    st.subheader("📁 Agrupación Jerárquica por Programa")
+    for prog, group in df_filt.groupby('PROGRAMA'):
+        with st.expander(f"📌 {prog} ({len(group)} registros SAP)"):
+            st.dataframe(group[['ACTIVIDAD', 'CR', 'GP', 'PEP', 'Clase de OM', 'Act PM', 'Descripcion Actividad PM', 'Descripción Act Operativa']], use_container_width=True)
