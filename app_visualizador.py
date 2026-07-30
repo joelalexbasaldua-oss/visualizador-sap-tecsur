@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import streamlit as st
 
@@ -13,6 +14,14 @@ st.title("⚡ Sistema Consolidado de Mapeo SAP y Programas TECSUR")
 st.markdown("Plataforma relacional unificada que conecta el **Catálogo Maestro de Programas (CR)** con el **Detalle Operativo SAP (PEP, OM, Actividades PM/OP)**.")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def extraer_tres_digitos(val):
+    """Extrae los últimos 3 dígitos numéricos (Ejemplo: 60132 -> '132', 132.0 -> '132')"""
+    if pd.isna(val):
+        return ""
+    val_clean = str(val).split('.')[0].strip()
+    match = re.search(r'(\d{3})$', val_clean)
+    return match.group(1) if match else val_clean
 
 @st.cache_data
 def cargar_y_consolidar_datos():
@@ -38,30 +47,34 @@ def cargar_y_consolidar_datos():
     else:
         raise FileNotFoundError("No se encontraron los archivos de origen de datos.")
 
-    # 2. Limpieza de nombres de columnas
+    # 2. Limpieza de columnas
     df_prog.columns = [str(c).strip() for c in df_prog.columns]
     df_act.columns = [str(c).strip() for c in df_act.columns]
 
-    # Identificar nombres clave
     col_desc_prog = 'Operación Lima / Cañete' if 'Operación Lima / Cañete' in df_prog.columns else df_prog.columns[-1]
     col_desc_act = 'ACTIVIDAD/PROGRAMA TECSUR' if 'ACTIVIDAD/PROGRAMA TECSUR' in df_act.columns else df_act.columns[1]
 
-    # Limpieza de textos para cruce perfecto
+    # 3. Creación de Llaves compuestas de cruce
+    # Llave 1: Texto de la Actividad
     df_prog['key_desc'] = df_prog[col_desc_prog].astype(str).str.strip().str.upper()
     df_act['key_desc'] = df_act[col_desc_act].astype(str).str.strip().str.upper()
 
-    # 3. CONSOLIDACIÓN / JOIN RELACIONAL
+    # Llave 2: Código numérico (CR de 5 dígitos -> 3 dígitos vs GP de 3 dígitos)
+    df_prog['key_gp'] = df_prog['CR'].apply(extraer_tres_digitos)
+    df_act['key_gp'] = df_act['GP'].apply(extraer_tres_digitos)
+
+    # 4. CRUCE RELACIONAL POR DOBLE LLAVE EXACTA (key_gp + key_desc)
     df_merged = pd.merge(
         df_act,
-        df_prog[['PROGRAMA', 'ACTIVIDAD', 'CR', 'key_desc']],
-        on='key_desc',
+        df_prog[['PROGRAMA', 'ACTIVIDAD', 'CR', 'key_desc', 'key_gp']],
+        on=['key_gp', 'key_desc'],
         how='left'
     )
 
-    # Eliminar columna auxiliar de cruce
-    df_merged.drop(columns=['key_desc'], inplace=True)
+    # Limpieza de columnas auxiliares
+    df_merged.drop(columns=['key_desc', 'key_gp'], inplace=True)
     
-    # Ordenar columnas estratégicamente
+    # Ordenamiento lógico de columnas
     cols_orden = [
         'PROGRAMA', 'ACTIVIDAD', 'CR', 'GP', 'ACTIVIDAD/PROGRAMA TECSUR', 
         'Unidad', 'PEP', 'Clase de OM', 'Act PM', 'Descripcion Actividad PM', 
@@ -73,12 +86,12 @@ def cargar_y_consolidar_datos():
 
 try:
     df_prog, df_act, df_consolidado = cargar_y_consolidar_datos()
-    st.success("✅ Base de datos relacional integrada exitosamente.")
+    st.success("✅ Base de datos relacional integrada por Doble Llave (CR/GP + Descripción).")
 except Exception as e:
     st.error(f"❌ Error durante el procesamiento relacional: {e}")
     st.stop()
 
-# --- BARRA LATERAL CON FILTROS AVANZADOS ---
+# --- BARRA LATERAL CON FILTROS ---
 st.sidebar.header("🎯 Filtros de Consulta Consolidada")
 
 # Filtro 1: Programa Maestro
@@ -95,11 +108,11 @@ else:
 
 act_sel = st.sidebar.selectbox("Código Actividad (PL/PC):", codigos_act)
 
-# Filtro 3: Clase de Orden de Mantenimiento
+# Filtro 3: Clase de OM
 clases_om = ["Todas"] + sorted([str(x).strip() for x in df_consolidado['Clase de OM'].dropna().unique() if str(x).strip() not in ['-', 'nan']])
 om_sel = st.sidebar.selectbox("Clase de OM (ZM03/ZM06):", clases_om)
 
-# Filtro 4: Búsqueda global por texto
+# Filtro 4: Búsqueda rápida por texto libre
 busqueda = st.sidebar.text_input("🔍 Búsqueda rápida global:", "")
 
 # --- APLICAR FILTROS EN CASCADA ---
@@ -122,7 +135,7 @@ if busqueda:
 
 # --- VISTA PRINCIPAL & METRICAS DE IMPACTO ---
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Registros Matheados", len(df_filt))
+k1.metric("Registros Filtrados", len(df_filt))
 k2.metric("Centros Responsabilidad (CR)", df_filt['CR'].nunique() if 'CR' in df_filt.columns else 0)
 k3.metric("Elementos PEP SAP", df_filt['PEP'].nunique() if 'PEP' in df_filt.columns else 0)
 k4.metric("Actividades PM Únicas", df_filt['Act PM'].nunique() if 'Act PM' in df_filt.columns else 0)
@@ -133,7 +146,7 @@ st.divider()
 tab1, tab2 = st.tabs(["📊 Vista Consolidada Unificada", "🔍 Inspector por Programa"])
 
 with tab1:
-    st.subheader("📋 Tabla Maestra Consolidada (Programas + SAP)")
+    st.subheader("📋 Tabla Maestra Consolidada")
     st.dataframe(df_filt, use_container_width=True, height=550)
 
 with tab2:
